@@ -1,0 +1,6 @@
+Flask
+flask-cors
+yt-dlp
+requests
+mutagen
+gunicorn
