@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import yt_dlp
 import requests
 import re
 import io
@@ -13,6 +12,14 @@ CORS(app)
 def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
+def extract_video_id(url):
+    # Regex to extract YouTube Video ID
+    pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    return None
+
 @app.route('/get-download-link', methods=['POST'])
 def extract_video_info():
     data = request.get_json()
@@ -20,91 +27,82 @@ def extract_video_info():
         return jsonify({"error": "URL Dena zaroori hai!"}), 400
 
     video_url = data['url'].strip()
+    video_id = extract_video_id(video_url)
 
-    if "music.youtube.com" in video_url:
-        video_url = video_url.replace("music.youtube.com", "www.youtube.com")
+    if not video_id:
+        return jsonify({"error": "Invalid YouTube URL!"}), 400
 
-    # YouTube Anti-Bot & PO Token Bypass Configuration
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'geo_bypass': True,
-        'format': 'bestaudio/best',
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tv_embedded', 'android', 'ios', 'mweb'],
-                'player_skip': ['configs']
-            }
-        }
-    }
+    # Public Invidious instances list for automatic failover/fallback
+    instances = [
+        f"https://api.invidious.io/api/v1/videos/{video_id}",
+        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
+        f"https://inv.tux.pizza/api/v1/videos/{video_id}"
+    ]
+
+    res_data = None
+    for instance_url in instances:
+        try:
+            res = requests.get(instance_url, timeout=7)
+            if res.status_code == 200:
+                res_data = res.json()
+                break
+        except Exception:
+            continue
+
+    if not res_data:
+        return jsonify({"error": "Video details fetch nahi ho paayi, kripya dobara try karein!"}), 500
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        title = res_data.get('title', 'Audio Track')
+        channel = res_data.get('author', 'YouTube')
+        
+        # High quality thumbnail
+        thumbnails = res_data.get('videoThumbnails', [])
+        thumbnail = thumbnails[-1].get('url') if thumbnails else f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
 
-            if not info:
-                return jsonify({"error": "Video details extract nahi ho paayi!"}), 400
+        audio_links = []
+        video_links = []
+        
+        adaptive_formats = res_data.get('adaptiveFormats', [])
+        format_streams = res_data.get('formatStreams', [])
 
-            title = info.get('title', 'Audio Track')
-            channel = info.get('uploader') or info.get('artist') or 'YouTube'
-            thumbnail = info.get('thumbnail', '')
+        # Extract Audio Stream
+        best_audio_url = None
+        for fmt in adaptive_formats:
+            if 'audio' in fmt.get('type', ''):
+                best_audio_url = fmt.get('url')
+                break
 
-            formats = info.get('formats', [])
+        if best_audio_url:
+            audio_links = [
+                {"quality": "320 kbps (High Quality)", "url": best_audio_url},
+                {"quality": "128 kbps (Standard)", "url": best_audio_url}
+            ]
 
-            best_audio = None
-            for f in reversed(formats):
-                if f.get('acodec') != 'none' and (f.get('vcodec') == 'none' or not f.get('vcodec')):
-                    best_audio = f.get('url')
-                    break
+        # Extract Video Streams (1080p, 720p, 360p)
+        seen_heights = set()
+        for fmt in format_streams:
+            quality_label = fmt.get('qualityLabel', '')
+            url = fmt.get('url')
+            if url and quality_label:
+                res_num = re.sub(r'\D', '', quality_label)
+                if res_num and int(res_num) in [1080, 720, 360] and res_num not in seen_heights:
+                    seen_heights.add(res_num)
+                    video_links.append({
+                        "quality": f"{res_num}p " + ("HD" if int(res_num) >= 720 else "SD"),
+                        "url": url
+                    })
 
-            if not best_audio:
-                for f in formats:
-                    if f.get('acodec') != 'none' and f.get('url'):
-                        best_audio = f.get('url')
-                        break
-
-            audio_links = []
-            if best_audio:
-                audio_links = [
-                    {"quality": "320 kbps (High Quality)", "url": best_audio},
-                    {"quality": "128 kbps (Standard)", "url": best_audio}
-                ]
-
-            video_links = []
-            seen_heights = set()
-            for f in reversed(formats):
-                if f.get('ext') == 'mp4' and f.get('url') and f.get('vcodec') != 'none':
-                    res = f.get('height')
-                    if res in [1080, 720, 360] and res not in seen_heights:
-                        seen_heights.add(res)
-                        video_links.append({
-                            "quality": f"{res}p HD" if res >= 720 else f"{res}p SD",
-                            "url": f.get('url')
-                        })
-
-            if not video_links:
-                direct_url = info.get('url')
-                if direct_url:
-                    video_links.append({"quality": "720p HD", "url": direct_url})
-                    video_links.append({"quality": "360p SD", "url": direct_url})
-
-            return jsonify({
-                "title": title,
-                "channel": channel,
-                "thumbnail": thumbnail,
-                "audio_links": audio_links,
-                "video_links": video_links
-            })
+        return jsonify({
+            "title": title,
+            "channel": channel,
+            "thumbnail": thumbnail,
+            "audio_links": audio_links,
+            "video_links": video_links
+        })
 
     except Exception as e:
-        return jsonify({"error": f"Video fetch nahi ho saka: {str(e)}"}), 500
+        return jsonify({"error": f"Error parsing video data: {str(e)}"}), 500
 
 
 @app.route('/download-file', methods=['GET'])
@@ -121,7 +119,7 @@ def download_file():
 
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         audio_res = requests.get(file_url, headers=headers, stream=True)
         audio_data = io.BytesIO(audio_res.content)
