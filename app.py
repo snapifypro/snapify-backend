@@ -24,7 +24,7 @@ def extract_video_info():
     if "music.youtube.com" in video_url:
         video_url = video_url.replace("music.youtube.com", "www.youtube.com")
 
-    # Updated yt-dlp Configuration for Render / Cloud Server Hostings
+    # Bot detection bypass config (No cookies required)
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -35,7 +35,8 @@ def extract_video_info():
         'format': 'bestaudio/best',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web']
+                'player_client': ['android_creator', 'ios', 'mweb'],
+                'player_skip': ['webpage', 'configs']
             }
         }
     }
