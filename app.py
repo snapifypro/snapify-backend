@@ -13,7 +13,6 @@ def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
 def extract_video_id(url):
-    # Regex to extract YouTube Video ID
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
     match = re.search(pattern, url)
     if match:
@@ -32,19 +31,27 @@ def extract_video_info():
     if not video_id:
         return jsonify({"error": "Invalid YouTube URL!"}), 400
 
-    # Public Invidious instances list for automatic failover/fallback
-    instances = [
+    # Multiple active public instances (Invidious + Piped API)
+    api_urls = [
+        f"https://pipedapi.kavin.rocks/streams/{video_id}",
+        f"https://api.piped.privacydev.net/streams/{video_id}",
         f"https://api.invidious.io/api/v1/videos/{video_id}",
-        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
         f"https://inv.tux.pizza/api/v1/videos/{video_id}"
     ]
 
     res_data = None
-    for instance_url in instances:
+    used_engine = None
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+    for endpoint in api_urls:
         try:
-            res = requests.get(instance_url, timeout=7)
+            res = requests.get(endpoint, headers=headers, timeout=5)
             if res.status_code == 200:
                 res_data = res.json()
+                used_engine = "piped" if "piped" in endpoint else "invidious"
                 break
         except Exception:
             continue
@@ -54,44 +61,62 @@ def extract_video_info():
 
     try:
         title = res_data.get('title', 'Audio Track')
-        channel = res_data.get('author', 'YouTube')
         
-        # High quality thumbnail
-        thumbnails = res_data.get('videoThumbnails', [])
-        thumbnail = thumbnails[-1].get('url') if thumbnails else f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+        if used_engine == "piped":
+            channel = res_data.get('uploader', 'YouTube')
+            thumbnail = res_data.get('thumbnailUrl', f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg")
+            
+            audio_links = []
+            video_links = []
 
-        audio_links = []
-        video_links = []
-        
-        adaptive_formats = res_data.get('adaptiveFormats', [])
-        format_streams = res_data.get('formatStreams', [])
+            # Audio Streams
+            audio_streams = res_data.get('audioStreams', [])
+            if audio_streams:
+                best_audio = audio_streams[0].get('url')
+                audio_links = [
+                    {"quality": "320 kbps (High Quality)", "url": best_audio},
+                    {"quality": "128 kbps (Standard)", "url": best_audio}
+                ]
 
-        # Extract Audio Stream
-        best_audio_url = None
-        for fmt in adaptive_formats:
-            if 'audio' in fmt.get('type', ''):
-                best_audio_url = fmt.get('url')
-                break
+            # Video Streams
+            seen_heights = set()
+            for v in res_data.get('videoStreams', []):
+                quality = v.get('quality', '')
+                url = v.get('url')
+                if url and quality and 'p' in quality:
+                    height = int(re.sub(r'\D', '', quality) or 0)
+                    if height in [1080, 720, 360] and height not in seen_heights:
+                        seen_heights.add(height)
+                        video_links.append({
+                            "quality": f"{height}p " + ("HD" if height >= 720 else "SD"),
+                            "url": url
+                        })
 
-        if best_audio_url:
-            audio_links = [
-                {"quality": "320 kbps (High Quality)", "url": best_audio_url},
-                {"quality": "128 kbps (Standard)", "url": best_audio_url}
-            ]
+        else:  # Invidious Parse
+            channel = res_data.get('author', 'YouTube')
+            thumbnails = res_data.get('videoThumbnails', [])
+            thumbnail = thumbnails[-1].get('url') if thumbnails else f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
 
-        # Extract Video Streams (1080p, 720p, 360p)
-        seen_heights = set()
-        for fmt in format_streams:
-            quality_label = fmt.get('qualityLabel', '')
-            url = fmt.get('url')
-            if url and quality_label:
-                res_num = re.sub(r'\D', '', quality_label)
-                if res_num and int(res_num) in [1080, 720, 360] and res_num not in seen_heights:
-                    seen_heights.add(res_num)
-                    video_links.append({
-                        "quality": f"{res_num}p " + ("HD" if int(res_num) >= 720 else "SD"),
-                        "url": url
-                    })
+            audio_links = []
+            video_links = []
+
+            for fmt in res_data.get('adaptiveFormats', []):
+                if 'audio' in fmt.get('type', ''):
+                    audio_links = [
+                        {"quality": "320 kbps (High Quality)", "url": fmt.get('url')},
+                        {"quality": "128 kbps (Standard)", "url": fmt.get('url')}
+                    ]
+                    break
+
+            for fmt in res_data.get('formatStreams', []):
+                q = fmt.get('qualityLabel', '')
+                if q:
+                    height = int(re.sub(r'\D', '', q) or 0)
+                    if height in [1080, 720, 360]:
+                        video_links.append({
+                            "quality": f"{height}p " + ("HD" if height >= 720 else "SD"),
+                            "url": fmt.get('url')
+                        })
 
         return jsonify({
             "title": title,
@@ -119,7 +144,7 @@ def download_file():
 
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         audio_res = requests.get(file_url, headers=headers, stream=True)
         audio_data = io.BytesIO(audio_res.content)
