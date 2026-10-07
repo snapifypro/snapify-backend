@@ -24,7 +24,7 @@ def extract_video_info():
     if "music.youtube.com" in video_url:
         video_url = video_url.replace("music.youtube.com", "www.youtube.com")
 
-    # Bot detection bypass config (No cookies required)
+    # YouTube Anti-Bot & PO Token Bypass Configuration
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -33,10 +33,14 @@ def extract_video_info():
         'ignoreerrors': False,
         'geo_bypass': True,
         'format': 'bestaudio/best',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android_creator', 'ios', 'mweb'],
-                'player_skip': ['webpage', 'configs']
+                'player_client': ['tv_embedded', 'android', 'ios', 'mweb'],
+                'player_skip': ['configs']
             }
         }
     }
@@ -117,7 +121,7 @@ def download_file():
 
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         }
         audio_res = requests.get(file_url, headers=headers, stream=True)
         audio_data = io.BytesIO(audio_res.content)
